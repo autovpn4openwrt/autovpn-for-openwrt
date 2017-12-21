@@ -1,0 +1,160 @@
+diff --git a/src/dnsmasq.h b/src/dnsmasq.h
+index 69ae7a7..8a8a1df 100644
+--- a/src/dnsmasq.h
++++ b/src/dnsmasq.h
+@@ -883,7 +883,8 @@ extern struct daemon {
+ 
+   /* utility string buffer, hold max sized IP address as string */
+   char *addrbuff;
+-
++  char *script;
++  char autovpn; 
+ } *daemon;
+ 
+ /* cache.c */
+diff --git a/src/forward.c b/src/forward.c
+index 1ea25dd..af42c6c 100644
+--- a/src/forward.c
++++ b/src/forward.c
+@@ -377,7 +377,16 @@ static int forward_query(int udpfd, union mysockaddr *udpaddr,
+ 		    }
+ #endif
+ 		}
+-	      
++	      if (daemon->script){
++                  //printf("use script\n");
++                  if (start->domain){
++                      //printf("get domain:%s  flags:%d\n",start->domain,start->flags);
++                      daemon->autovpn=1;
++                  }else{
++                      //printf("domain not found:%s  flags:%d\n",start->domain,start->flags);
++                      daemon->autovpn=0;
++                  }
++              }
+ 	      if (sendto(fd, (char *)header, plen, 0,
+ 			 &start->addr.sa,
+ 			 sa_len(&start->addr)) == -1)
+@@ -987,7 +996,7 @@ unsigned char *tcp_request(int confd, time_t now,
+ 		      if (type != (last_server->flags & SERV_TYPE) ||
+ 			  (type == SERV_HAS_DOMAIN && !hostname_isequal(domain, last_server->domain)))
+ 			continue;
+-		      
++
+ 		      if (last_server->tcpfd == -1)
+ 			{
+ 			  if ((last_server->tcpfd = socket(last_server->addr.sa.sa_family, SOCK_STREAM, 0)) == -1)
+@@ -1022,7 +1031,16 @@ unsigned char *tcp_request(int confd, time_t now,
+ 		      
+ 		      c1 = size >> 8;
+ 		      c2 = size;
+-		      
++		      if (daemon->script){
++                          //printf("tcp use script\n");
++                          if (last_server->domain){
++                              //printf("tcp get domain:%s  flags:%d\n",last_server->domain,last_server->flags);
++                              daemon->autovpn=1;
++                          }else{
++                              //printf("tcp domain not found:%s  flags:%d\n",last_server->domain,last_server->flags);
++                              daemon->autovpn=0;
++                          }
++                      }
+ 		      if (!read_write(last_server->tcpfd, &c1, 1, 0) ||
+ 			  !read_write(last_server->tcpfd, &c2, 1, 0) ||
+ 			  !read_write(last_server->tcpfd, packet, size, 0) ||
+diff --git a/src/option.c b/src/option.c
+index b2596ec..5d34b69 100644
+--- a/src/option.c
++++ b/src/option.c
+@@ -131,6 +131,7 @@ struct myoption {
+ #ifdef OPTION6_PREFIX_CLASS 
+ #define LOPT_PREF_CLSS 320
+ #endif
++#define LOPT_SERVSCRIPT 500
+ 
+ #ifdef HAVE_GETOPT_LONG
+ static const struct option opts[] =  
+@@ -267,6 +268,7 @@ static const struct myoption opts[] =
+ #ifdef OPTION6_PREFIX_CLASS 
+     { "dhcp-prefix-class", 1, 0, LOPT_PREF_CLSS },
+ #endif
++    { "server-script", 1, 0, LOPT_SERVSCRIPT },
+     { NULL, 0, 0, 0 }
+   };
+ 
+@@ -409,6 +411,7 @@ static struct {
+ #ifdef OPTION6_PREFIX_CLASS 
+   { LOPT_PREF_CLSS, ARG_DUP, "set:tag,<class>", gettext_noop("Specify DHCPv6 prefix class"), NULL },
+ #endif
++  { LOPT_SERVSCRIPT, ARG_ONE, "<script>", gettext_noop("If queries domain in --server config will execute the script when reply to client"), NULL },
+   { 0, 0, NULL, NULL, NULL }
+ }; 
+ 
+@@ -3461,7 +3464,17 @@ static int one_opt(int option, char *arg, char *errstr, char *gen_err, int comma
+ 	daemon->host_records_tail = new;
+ 	break;
+       }
+-      
++      case LOPT_SERVSCRIPT: /* --server-script */
++
++      {
++	char *script = opt_string_alloc(arg);
++	if (script)
++	  {
++	    daemon->script=script;
++	    daemon->autovpn=0;
++	  }
++       break;
++      }
+     default:
+       ret_err(_("unsupported option (check that dnsmasq was compiled with DHCP/TFTP/DBus support)"));
+       
+diff --git a/src/rfc1035.c b/src/rfc1035.c
+index 8d55ffd..7844e1a 100644
+--- a/src/rfc1035.c
++++ b/src/rfc1035.c
+@@ -916,6 +916,9 @@ int extract_addresses(struct dns_header *header, size_t qlen, char *name, time_t
+ 	      if (!(p1 = skip_questions(header, qlen)))
+ 		return 0;
+ 	      
++              char *ips=(char *)malloc(header->ancount*16);
++	      int offset = 0;
++              char ip[INET6_ADDRSTRLEN];
+ 	      for (j = ntohs(header->ancount); j != 0; j--) 
+ 		{
+ 		  if (!(res = extract_name(header, qlen, &p1, name, 0, 10)))
+@@ -980,7 +983,14 @@ int extract_addresses(struct dns_header *header, size_t qlen, char *name, time_t
+ 				add_to_ipset(*ipsets_cur++, &addr, flags, 0);
+ 			    }
+ #endif
+-			  
++			  if (daemon->autovpn && (flags & (F_IPV4 | F_IPV6)) && aqtype == T_A)
++			    {
++			       if (!inet_ntop(AF_INET, (void *)&addr.addr.addr4, ip, sizeof(ip))) {
++				  printf("error:inet_ntop\n");
++			       }else{
++			          offset+=sprintf(ips + offset,"%s,",ip);
++			       }
++			    }
+ 			  newc = cache_insert(name, &addr, now, attl, flags | F_FORWARD);
+ 			  if (newc && cpp)
+ 			    {
+@@ -995,6 +1005,19 @@ int extract_addresses(struct dns_header *header, size_t qlen, char *name, time_t
+ 		  if (!CHECK_LEN(header, p1, qlen, 0))
+ 		    return 0; /* bad packet */
+ 		}
++		if (daemon->autovpn && (flags & (F_IPV4|F_IPV6)) && aqtype == T_A){
++			ips[offset - 1] = '\0';
++			char *cmd=(char *)malloc(strlen(ips)+strlen(daemon->script)+10);
++			sprintf(cmd, "%s %s", daemon->script,ips);
++			//printf("%s\n",cmd);
++			int status=WEXITSTATUS(system(cmd));
++			if (status != 0)
++			    printf("script_exec_error: %d\n",status);
++			free(cmd);
++			free(ips);
++                        cmd=0;
++                        ips=0;
++		}
+ 	    }
+ 	  
+ 	  if (!found && !option_bool(OPT_NO_NEG))

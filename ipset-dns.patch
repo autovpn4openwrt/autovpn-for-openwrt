@@ -1,0 +1,59 @@
+diff --git a/ipset-dns.c b/ipset-dns.c
+index 80c7cc1..0a135a2 100644
+--- a/ipset-dns.c
++++ b/ipset-dns.c
+@@ -308,14 +308,17 @@ int main(int argc, char *argv[])
+ 	char msg[512];
+ 	char ip[INET6_ADDRSTRLEN];
+ 	char *ipset;
++	char *ips;
++	char *cmd;
++	int offset;
+ 	int listen_sock, upstream_sock;
+ 	int pos, i, size, af;
+ 	socklen_t len;
+ 	size_t received;
+ 	pid_t child;
+ 	
+-	if (argc != 4) {
+-		fprintf(stderr, "Usage: %s ipset port upstream\n", argv[0]);
++	if (argc < 4) {
++		fprintf(stderr, "Usage: %s ipset port upstream [script]\n", argv[0]);
+ 		return 1;
+ 	}
+ 
+@@ -412,6 +415,8 @@ int main(int argc, char *argv[])
+ 				goto send_back;
+ 			pos += size;
+ 		}
++		ips=(char *)malloc(answer_header.ancount*16);
++		offset = 0;
+ 		for (i = 0; i < answer_header.ancount; ++i) {
+ 			if (pos >= received || pos < 0)
+ 				goto send_back;
+@@ -433,12 +438,24 @@ int main(int argc, char *argv[])
+ 				perror("inet_ntop");
+ 				continue;
+ 			}
+-
++			offset+=sprintf(ips + offset,"%s,",ip);
++			
+ 			printf("%s: %s\n", answer.dotted, ip);
+ 			if (add_to_ipset(ipset, answer.rdata, af) < 0)
+ 				perror("add_to_ipset");
+ 		}
++		cmd=(char *)malloc(strlen(ips)+strlen(argv[4])+10);
++		ips[offset - 1] = '\0';
++		if (argc==5){
++			sprintf(cmd, "%s %s", argv[4],ips);
++			printf("%s\n", cmd);
++			int status=WEXITSTATUS(system(cmd));
++			if (status != 0)
++				printf("script_exec_error: %d\n",status);
++		}
+ 		
++		free(ips);
++		free(cmd);
+ 	send_back:
+ 		if (sendto(listen_sock, msg, received, 0, (struct sockaddr *)&client_addr, sizeof(client_addr)) < 0)
+ 			perror("sendto");

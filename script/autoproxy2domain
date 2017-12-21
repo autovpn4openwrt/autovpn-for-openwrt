@@ -1,0 +1,88 @@
+#!/bin/bash
+# Convert AutoProxy rules to domain name.
+
+# Spec: https://autoproxy.org/zh-CN/Rules
+# Regular Expression                        # AutoProxy Rule Example            domain name
+re_domain='^\|\|([^/]+)/?$'                 # ||example.com                     example.com
+re_start='^\|http(s?)://([^/\]+)([^\]*)'    # |https://ssl.example.com/foo*bar  skip this rule
+re_regex='^/(.*)/$'                         # /^https?:\/\/[^\/]+example\.com/  skip this rule
+re_negate='^@@([^@].*)'                     # @@||example.com                   skip this rule
+re_comment='^!(.*)'                         # !Foo Bar                          skip this line
+re_keyword='^(https?://|/)?([^/|\*%]+)([^\]*)' # .example.com/foo*bar           pure domain name only,exclude keyword line
+
+# Regular expression to shell expansion is lossy;
+# this is the only regex used in practice, so far.
+re_regex_a='^/\^https\?:\\/\\/\[\^\\/\]\+([^/]+)/$'
+
+COMMENT=1
+
+FORWARD_FOR=()
+atprxy2dnsmasq()
+{
+  local file=$1 line pattern
+  while read -r line; do
+    _atprxy2dnsmasq "$line"
+  done < <(sed '/^\[AutoProxy [0-9.]\+\]$/d' "${file}")
+  for pattern in "${FORWARD_FOR[@]}"; do
+      echo $pattern
+  done
+}
+
+_atprxy2dnsmasq()
+{
+  local s=$1 results=() noproxy=$2
+  if [[ "$s" =~ $re_domain ]]; then
+    if echo $s|grep -q "*"  ;then
+      results+=("${s#*.}")
+      #results+=("*.${s#*.}")
+    else
+      results+=("${BASH_REMATCH[1]}")
+    fi
+  elif [[ "$s" =~ $re_start ]]; then
+    :
+  elif [[ "$s" =~ $re_regex ]]; then
+    :
+  elif [[ "$s" =~ $re_negate ]]; then
+    :
+  elif [[ "$s" =~ $re_comment ]] && [ "$COMMENT" ]; then
+    :
+  elif [[ "$s" =~ $re_keyword ]]; then
+    local slash=${BASH_REMATCH[1]}
+    local one=${BASH_REMATCH[2]}
+    local two=${BASH_REMATCH[3]}
+    if echo $s|grep -qP "\*|/|%|\\|\||([1-2]?[0-9]?[0-9]\.){3}[0-9]{1,3}" ;then
+      :
+    elif echo $one|grep -qP ".+\..+" ;then
+      tmp="${one#.}"
+      results+=("${tmp%.}")
+    fi
+  elif [ -n "${s// /}" ]; then
+    :
+  fi
+  local r
+  for r in "${results[@]}"; do
+    FORWARD_FOR+=("$r")
+  done
+}
+
+# * ? [a-z] => regex
+# seems only `*' is used?
+# `?' seems to be treated as a literal.
+_sh2regex()
+{
+  # Again, no backslash is used in practice.
+  # Casual non-exhaustive escaping >.>
+  sed 's/[{(^.?$)}]/\\&/g;s/\*/.&/g' <<< "$1"
+}
+
+# .* -> *  x? -> ?  . -> ?  \ ->
+_regex2sh()
+{
+  # In practice, \\ won't be in the URL regex.
+  # assuming really simple regex.
+  sed 's/\.\*/\*/g;s/\([^\]\)\(?\)/?/g;s/\([^\]\)\(\.\)/\1?/g;s/\\//g' <<< "$1"
+}
+
+echo "Generating Dnsmasq Server list..." >&2
+echo "This may take a while..." >&2
+atprxy2dnsmasq "$1" "$2"|sort -u

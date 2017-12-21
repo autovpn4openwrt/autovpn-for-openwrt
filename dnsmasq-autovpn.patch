@@ -1,0 +1,201 @@
+diff --git a/src/dnsmasq.h b/src/dnsmasq.h
+index 69ae7a7..e2a22ac 100644
+--- a/src/dnsmasq.h
++++ b/src/dnsmasq.h
+@@ -883,7 +883,7 @@ extern struct daemon {
+ 
+   /* utility string buffer, hold max sized IP address as string */
+   char *addrbuff;
+-
++  char *script;
+ } *daemon;
+ 
+ /* cache.c */
+@@ -923,7 +923,7 @@ size_t setup_reply(struct dns_header *header, size_t  qlen,
+ 		   struct all_addr *addrp, unsigned int flags,
+ 		   unsigned long local_ttl);
+ int extract_addresses(struct dns_header *header, size_t qlen, char *namebuff, 
+-		      time_t now, char **ipsets, int is_sign, int checkrebind,
++		      time_t now, char **ipsets,char *script, int is_sign, int checkrebind,
+ 		      int checking_disabled);
+ size_t answer_request(struct dns_header *header, char *limit, size_t qlen,  
+ 		   struct in_addr local_addr, struct in_addr local_netmask, time_t now);
+diff --git a/src/forward.c b/src/forward.c
+index 1ea25dd..149ccfc 100644
+--- a/src/forward.c
++++ b/src/forward.c
+@@ -442,6 +442,8 @@ static size_t process_reply(struct dns_header *header, time_t now,
+   char **sets = 0;
+   int munged = 0, is_sign;
+   size_t plen; 
++  char *vpn_domain = 0;
++  int vpn_domain_flags = 0;
+ 
+ #ifdef HAVE_IPSET
+   /* Similar algorithm to search_servers. */
+@@ -461,6 +463,42 @@ static size_t process_reply(struct dns_header *header, time_t now,
+     }
+ #endif
+   
++if (daemon->script){
++  struct server *server_pos;
++  unsigned int namelen = strlen(daemon->namebuff);
++  unsigned int matchlen = 0;
++
++  for (server_pos = daemon->servers; server_pos; server_pos = server_pos->next) 
++    {
++      //if (!inet_ntop(AF_INET, (void *)&server_pos->addr.in.sin_addr,ip, sizeof(ip))) {
++      //     printf ("inet_ntop error\n");
++      //}
++      //printf("domain:%s %s\n",server_pos->domain ,ip);
++      if (server_pos->domain!=NULL){
++          unsigned int domainlen = strlen(server_pos->domain);
++          char *matchstart = daemon->namebuff + namelen - domainlen;
++          //printf("test:%s %s %s %s \n",(namelen >= domainlen)?"true":"false",hostname_isequal(matchstart, server_pos->domain)?"true":"false",(namelen == domainlen || *(matchstart - 1) == '.' )?"true":"false",(domainlen >= matchlen)?"true":"false");
++          if (namelen >= domainlen && hostname_isequal(matchstart, server_pos->domain) &&
++    	      (domainlen == 0 || namelen == domainlen || *(matchstart - 1) == '.' ) &&
++        	  domainlen >= matchlen) {
++        	matchlen = domainlen;
++        	vpn_domain  = server_pos->domain;
++        	vpn_domain_flags  = server_pos->flags;
++          }
++      } else{
++          continue;
++      }
++    }
++    if (vpn_domain){
++        //if ( !(vpn_domain_flags & SERV_USE_RESOLV))
++            //printf("vpn domain:%s flags:%d\n",vpn_domain,vpn_domain_flags);
++        //else{
++            //printf("exclude domain:%s flags:%d\n",vpn_domain,vpn_domain_flags);
++        if ( vpn_domain_flags & SERV_USE_RESOLV){
++            vpn_domain=0;
++        }
++    }
++}
+   /* If upstream is advertising a larger UDP packet size
+      than we allow, trim it so that we don't get overlarge
+      requests for the client. We can't do this for signed packets. */
+@@ -513,7 +551,7 @@ static size_t process_reply(struct dns_header *header, time_t now,
+ 	  SET_RCODE(header, NOERROR);
+ 	}
+       
+-      if (extract_addresses(header, n, daemon->namebuff, now, sets, is_sign, check_rebind, checking_disabled))
++      if (extract_addresses(header, n, daemon->namebuff, now, sets, vpn_domain,is_sign, check_rebind, checking_disabled))
+ 	{
+ 	  my_syslog(LOG_WARNING, _("possible DNS-rebind attack detected: %s"), daemon->namebuff);
+ 	  munged = 1;
+diff --git a/src/option.c b/src/option.c
+index b2596ec..a997911 100644
+--- a/src/option.c
++++ b/src/option.c
+@@ -131,6 +131,7 @@ struct myoption {
+ #ifdef OPTION6_PREFIX_CLASS 
+ #define LOPT_PREF_CLSS 320
+ #endif
++#define LOPT_SERVSCRIPT 500
+ 
+ #ifdef HAVE_GETOPT_LONG
+ static const struct option opts[] =  
+@@ -267,6 +268,7 @@ static const struct myoption opts[] =
+ #ifdef OPTION6_PREFIX_CLASS 
+     { "dhcp-prefix-class", 1, 0, LOPT_PREF_CLSS },
+ #endif
++    { "server-script", 1, 0, LOPT_SERVSCRIPT },
+     { NULL, 0, 0, 0 }
+   };
+ 
+@@ -409,6 +411,7 @@ static struct {
+ #ifdef OPTION6_PREFIX_CLASS 
+   { LOPT_PREF_CLSS, ARG_DUP, "set:tag,<class>", gettext_noop("Specify DHCPv6 prefix class"), NULL },
+ #endif
++  { LOPT_SERVSCRIPT, ARG_ONE, "<script>", gettext_noop("If queries domain in --server config will execute the script when reply to client"), NULL },
+   { 0, 0, NULL, NULL, NULL }
+ }; 
+ 
+@@ -3461,7 +3464,16 @@ static int one_opt(int option, char *arg, char *errstr, char *gen_err, int comma
+ 	daemon->host_records_tail = new;
+ 	break;
+       }
+-      
++      case LOPT_SERVSCRIPT: /* --server-script */
++
++      {
++	char *script = opt_string_alloc(arg);
++	if (script)
++	  {
++	    daemon->script=script;
++	  }
++       break;
++      }
+     default:
+       ret_err(_("unsupported option (check that dnsmasq was compiled with DHCP/TFTP/DBus support)"));
+       
+diff --git a/src/rfc1035.c b/src/rfc1035.c
+index 8d55ffd..43aa382 100644
+--- a/src/rfc1035.c
++++ b/src/rfc1035.c
+@@ -777,7 +777,7 @@ static int find_soa(struct dns_header *header, size_t qlen, char *name)
+    expired and cleaned out that way. 
+    Return 1 if we reject an address because it look like part of dns-rebinding attack. */
+ int extract_addresses(struct dns_header *header, size_t qlen, char *name, time_t now, 
+-		      char **ipsets, int is_sign, int check_rebind, int checking_disabled)
++		      char **ipsets, char *vpn_domain ,int is_sign, int check_rebind, int checking_disabled)
+ {
+   unsigned char *p, *p1, *endrr, *namep;
+   int i, j, qtype, qclass, aqtype, aqclass, ardlen, res, searched_soa = 0;
+@@ -915,7 +915,10 @@ int extract_addresses(struct dns_header *header, size_t qlen, char *name, time_t
+ 	    cname_loop1:
+ 	      if (!(p1 = skip_questions(header, qlen)))
+ 		return 0;
+-	      
++
++              char *ips=0;
++	      int offset = 0;
++              char ip[INET6_ADDRSTRLEN];
+ 	      for (j = ntohs(header->ancount); j != 0; j--) 
+ 		{
+ 		  if (!(res = extract_name(header, qlen, &p1, name, 0, 10)))
+@@ -980,7 +983,19 @@ int extract_addresses(struct dns_header *header, size_t qlen, char *name, time_t
+ 				add_to_ipset(*ipsets_cur++, &addr, flags, 0);
+ 			    }
+ #endif
+-			  
++			  if (vpn_domain && (flags & (F_IPV4 | F_IPV6)) && aqtype == T_A)
++			    {
++			       if (!inet_ntop(AF_INET, (void *)&addr.addr.addr4, ip, sizeof(ip))) {
++				  printf("error:inet_ntop\n");
++			       }else{
++                                  if (!ips){
++                                      //printf("ancount:%d\n",ntohs(header->ancount));
++                                      ips=(char *)safe_malloc(ntohs(header->ancount)*16);
++                                  }
++                                  if (ips)
++			              offset+=sprintf(ips + offset,"%s,",ip);
++			       }
++			    }
+ 			  newc = cache_insert(name, &addr, now, attl, flags | F_FORWARD);
+ 			  if (newc && cpp)
+ 			    {
+@@ -995,6 +1010,21 @@ int extract_addresses(struct dns_header *header, size_t qlen, char *name, time_t
+ 		  if (!CHECK_LEN(header, p1, qlen, 0))
+ 		    return 0; /* bad packet */
+ 		}
++		if (offset){
++			ips[offset - 1] = '\0';
++			char *cmd=(char *)safe_malloc(strlen(ips)+strlen(daemon->script)+10);
++                        if (cmd){
++			    sprintf(cmd, "%s %s", daemon->script,ips);
++			    //printf("%s\n",cmd);
++			    int status=WEXITSTATUS(system(cmd));
++			    if (status != 0)
++			        printf("script_exec_error: %d\n",status);
++                            free(cmd);
++                            cmd=0;
++                        }
++                        free(ips);
++                        ips=0;
++		}
+ 	    }
+ 	  
+ 	  if (!found && !option_bool(OPT_NO_NEG))
